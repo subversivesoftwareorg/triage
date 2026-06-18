@@ -17,12 +17,16 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>18</string>
+	<string>19</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Mail+ uses Accessibility to provide single-key shortcuts (d/a/r/f/h) when Mail.app is focused.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Mail+ needs access to Mail.app to read your account statistics and manage snoozed messages.</string>
+	<key>SUFeedURL</key>
+	<string>https://subversivesoftware.org/updates/mailplus/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>o8LVWN856eET9FIPLD7qHGEDu6+7s9amIf+TH2pIEHs=</string>
 </dict>
 </plist>
