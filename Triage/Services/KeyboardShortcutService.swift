@@ -146,6 +146,18 @@ final class KeyboardShortcutService {
         let flags = event.flags
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
 
+        // Cmd+Shift+S → Send + Follow Up (must check before Cmd+S)
+        if keyCode == 1
+            && flags.contains(.maskCommand)
+            && flags.contains(.maskShift)
+            && !flags.contains(.maskControl)
+            && !flags.contains(.maskAlternate) {
+            Task { @MainActor in
+                await service.sendAndFollowUp()
+            }
+            return nil
+        }
+
         // Cmd+S → Send (remap to Cmd+Shift+D)
         if keyCode == 1
             && flags.contains(.maskCommand)
@@ -261,6 +273,54 @@ final class KeyboardShortcutService {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             process.arguments = ["-e", script]
             try? process.run()
+        }
+    }
+
+    func sendAndFollowUp() async {
+        let script = """
+        tell application "Mail"
+            set outMsg to outgoing message of front window
+            set subj to subject of outMsg
+            set recipAddrs to {}
+            repeat with r in (every to recipient of outMsg)
+                set end of recipAddrs to address of r
+            end repeat
+            set AppleScript's text item delimiters to ", "
+            set recipStr to recipAddrs as string
+            return subj & "\\t" & recipStr
+        end tell
+        """
+        guard let output = try? await runScript(script), !output.isEmpty else {
+            Self.postKeystrokeStatic(keyCode: 2, flags: [.maskCommand, .maskShift])
+            return
+        }
+        let parts = output.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let subject = parts[0]
+        let recipients = parts.count > 1 ? parts[1] : ""
+
+        Self.postKeystrokeStatic(keyCode: 2, flags: [.maskCommand, .maskShift])
+
+        let createScript = """
+        tell application "Reminders"
+            set taskList to default list
+            set dueDate to (current date) + 7 * days
+            set hours of dueDate to 9
+            set minutes of dueDate to 0
+            set seconds of dueDate to 0
+            make new reminder in taskList with properties {name:"Follow up: \(Self.escaped(subject))", body:"Sent to: \(Self.escaped(recipients))", due date:dueDate}
+        end tell
+        """
+        if (try? await runScript(createScript)) != nil {
+            let content = UNMutableNotificationContent()
+            content.title = "Follow-up Set — 1 Week"
+            content.body = subject
+            content.sound = nil
+            let request = UNNotificationRequest(
+                identifier: "followup-\(Date.now.timeIntervalSince1970)",
+                content: content,
+                trigger: nil
+            )
+            try? await UNUserNotificationCenter.current().add(request)
         }
     }
 
