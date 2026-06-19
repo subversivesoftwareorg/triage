@@ -20,7 +20,9 @@ Gmail-style single-key shortcuts when Mail.app is focused. Shortcuts are interce
 | `h` | Remind tonight | Mail.app Remind Me — tonight |
 | `j` | Remind tomorrow | Mail.app Remind Me — tomorrow |
 | `k` | Remind later | Mail.app Remind Me — opens date picker |
+| `/` | Search | Focus the search field to search all mail |
 | `⌘S` | Send | Remaps to `⌘⇧D` (Mail.app Send) |
+| `⇧⌘S` | Send + Follow Up | Send and create a 1-week follow-up reminder |
 
 Single-key shortcuts are automatically disabled in compose windows, search fields, and text inputs.
 
@@ -38,7 +40,11 @@ Press `b` to block a sender or `⇧B` to block an entire domain. Blocks are stor
 
 ### Reminders Integration
 
-Press `t` to create a Reminder from the selected message. Sets "Follow up: [subject]" with the sender in the body, due tomorrow at 9am, in the default Reminders list.
+Press `t` to create a Reminder from the selected message. Sets "Follow up: [subject]" with the sender and a `message://` deep link in the body, due tomorrow at 9am, in the default Reminders list.
+
+### Send + Follow Up
+
+Press `⇧⌘S` in a compose window to send the message and automatically create a follow-up reminder due in one week. Triage captures the subject and recipients before sending, then polls the Sent mailbox to include a `message://` deep link back to the original message.
 
 ### Remind Me
 
