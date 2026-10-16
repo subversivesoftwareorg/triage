@@ -6,6 +6,7 @@
 	<false/>
 	<key>com.apple.security.application-groups</key>
 	<array>
+		<string>84CC987JU3.com.subversivesoftware.triage</string>
 		<string>group.com.subversivesoftware.triage</string>
 	</array>
 	<key>com.apple.security.automation.apple-events</key>

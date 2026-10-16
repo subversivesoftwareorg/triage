@@ -8,9 +8,12 @@ final class StatsStore {
     var isLoading = false
     var lastRefresh: Date?
     var errorMessage: String?
+    /// Set when the on-disk store couldn't be opened and history is only kept in memory.
+    var storageWarning: String?
 
     private let queryService = MailQueryService()
     private var pollTask: Task<Void, Never>?
+    private var lastPrune: Date?
     private let modelContainer: ModelContainer
 
     init(modelContainer: ModelContainer) {
@@ -57,6 +60,7 @@ final class StatsStore {
             lastRefresh = .now
             errorMessage = nil
             persistSnapshots()
+            pruneHistoryIfNeeded()
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -143,10 +147,26 @@ final class StatsStore {
             let record = ActivityRecord(
                 accountName: account.name,
                 unreadCount: account.unreadCount,
-                totalInboxCount: account.totalInboxCount
+                totalInboxCount: account.totalInboxCount,
+                sentCount: account.sentCount,
+                trashCount: account.trashCount
             )
             context.insert(record)
         }
+        try? context.save()
+    }
+
+    /// A snapshot per account every poll adds up (80 MB after four months), so drop
+    /// records older than the dashboard can show. Runs at most once a day.
+    private func pruneHistoryIfNeeded() {
+        if let lastPrune, Date.now.timeIntervalSince(lastPrune) < 86_400 { return }
+        let cutoff = Calendar.current.date(byAdding: .day, value: -Constants.historyRetentionDays, to: .now)!
+        Self.pruneHistory(in: ModelContext(modelContainer), before: cutoff)
+        lastPrune = .now
+    }
+
+    static func pruneHistory(in context: ModelContext, before cutoff: Date) {
+        try? context.delete(model: ActivityRecord.self, where: #Predicate { $0.timestamp < cutoff })
         try? context.save()
     }
 }

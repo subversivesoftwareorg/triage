@@ -1,35 +1,64 @@
 import Foundation
+import os
 
 final class MailQueryService: Sendable {
 
     // MARK: - Account Queries
 
+    // Inbox, Sent and Trash are app-level unified mailboxes with one child per account,
+    // matched here by account id. Accounts have no `sent mailbox` of their own, and their
+    // inbox isn't always named "INBOX" (Exchange uses "Inbox").
     func fetchAccountStats() async throws -> [AccountSnapshot] {
         let script = """
-        tell application "Mail"
-            set output to ""
-            set acctList to every account
-            repeat with i from 1 to (count of acctList)
-                set acct to item i of acctList
+        on countsByAccount(topBox)
+            tell application "Mail"
+                set ids to {}
+                set totals to {}
+                set unreads to {}
                 try
-                    set aName to name of acct
-                    set aEmail to email addresses of acct
-                    set firstEmail to ""
-                    if (count of aEmail) > 0 then
-                        set firstEmail to item 1 of aEmail
+                    repeat with mb in mailboxes of topBox
+                        try
+                            set mbID to id of account of mb
+                            set mbTotal to count of messages of mb
+                            set mbUnread to unread count of mb
+                            set end of ids to mbID
+                            set end of totals to mbTotal
+                            set end of unreads to mbUnread
+                        end try
+                    end repeat
+                end try
+                return {ids, totals, unreads}
+            end tell
+        end countsByAccount
+
+        on countFor(acctID, counts, column)
+            set ids to item 1 of counts
+            repeat with j from 1 to (count of ids)
+                if item j of ids is acctID then return item j of (item column of counts)
+            end repeat
+            return 0
+        end countFor
+
+        tell application "Mail"
+            set inboxCounts to my countsByAccount(inbox)
+            set sentCounts to my countsByAccount(sent mailbox)
+            set trashCounts to my countsByAccount(trash mailbox)
+            set output to ""
+            repeat with acct in every account
+                try
+                    set aID to id of acct
+                    if (item 1 of inboxCounts) contains aID then
+                        set aEmail to email addresses of acct
+                        set firstEmail to ""
+                        if (count of aEmail) > 0 then
+                            set firstEmail to item 1 of aEmail
+                        end if
+                        set unreadNum to my countFor(aID, inboxCounts, 3)
+                        set msgCount to my countFor(aID, inboxCounts, 2)
+                        set sentNum to my countFor(aID, sentCounts, 2)
+                        set trashNum to my countFor(aID, trashCounts, 2)
+                        set output to output & (name of acct) & "\\t" & firstEmail & "\\t" & unreadNum & "\\t" & msgCount & "\\t" & sentNum & "\\t" & trashNum & linefeed
                     end if
-                    set mb to mailbox "INBOX" of acct
-                    set unreadNum to unread count of mb
-                    set msgCount to count of messages of mb
-                    set sentNum to 0
-                    try
-                        set sentNum to count of messages of sent mailbox of acct
-                    end try
-                    set trashNum to 0
-                    try
-                        set trashNum to count of messages of trash mailbox of acct
-                    end try
-                    set output to output & aName & "\\t" & firstEmail & "\\t" & unreadNum & "\\t" & msgCount & "\\t" & sentNum & "\\t" & trashNum & linefeed
                 end try
             end repeat
             return output
@@ -250,33 +279,7 @@ final class MailQueryService: Sendable {
     // MARK: - Private
 
     private func runAppleScript(_ source: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", source]
-
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-
-            process.terminationHandler = { proc in
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                if proc.terminationStatus == 0, let output = String(data: data, encoding: .utf8) {
-                    continuation.resume(returning: output.trimmingCharacters(in: .whitespacesAndNewlines))
-                } else {
-                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let errMsg = String(data: errData, encoding: .utf8) ?? "osascript failed"
-                    continuation.resume(throwing: MailQueryError.scriptFailed(errMsg))
-                }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
+        try await AppleScriptRunner.run(source)
     }
 
     static func parseAccountOutput(_ output: String) -> [AccountSnapshot] {
@@ -289,7 +292,9 @@ final class MailQueryService: Sendable {
                     name: parts[0],
                     email: parts.count > 1 ? parts[1] : "",
                     unreadCount: Int(parts[2]) ?? 0,
-                    totalInboxCount: Int(parts[3]) ?? 0
+                    totalInboxCount: Int(parts[3]) ?? 0,
+                    sentCount: parts.count > 4 ? Int(parts[4]) ?? 0 : 0,
+                    trashCount: parts.count > 5 ? Int(parts[5]) ?? 0 : 0
                 )
             }
     }
@@ -300,14 +305,76 @@ final class MailQueryService: Sendable {
     }
 }
 
+// MARK: - AppleScript Runner
+
+enum AppleScriptRunner {
+    /// Runs `source` with osascript and returns its trimmed stdout.
+    ///
+    /// Both pipes are drained while osascript runs: reading only after it exits deadlocks once
+    /// the output fills the 64 KB pipe buffer (e.g. a long email body). osascript is killed
+    /// after `timeout` so a stalled Mail.app can't hang polling forever.
+    static func run(_ source: String, timeout: TimeInterval = 60) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                process.arguments = ["-e", source]
+
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
+
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let timedOut = OSAllocatedUnfairLock(initialState: false)
+                let watchdog = DispatchWorkItem {
+                    timedOut.withLock { $0 = true }
+                    process.terminate()
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+                var errData = Data()
+                let errRead = DispatchGroup()
+                errRead.enter()
+                DispatchQueue.global().async {
+                    errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    errRead.leave()
+                }
+                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+                errRead.wait()
+                process.waitUntilExit()
+                watchdog.cancel()
+
+                if timedOut.withLock({ $0 }) {
+                    continuation.resume(throwing: MailQueryError.timedOut)
+                } else if process.terminationStatus == 0 {
+                    let output = String(decoding: outData, as: UTF8.self)
+                    continuation.resume(returning: output.trimmingCharacters(in: .whitespacesAndNewlines))
+                } else {
+                    let errMsg = String(decoding: errData, as: UTF8.self)
+                    continuation.resume(throwing: MailQueryError.scriptFailed(errMsg.isEmpty ? "osascript failed" : errMsg))
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Errors
 
 enum MailQueryError: Error, LocalizedError {
     case scriptFailed(String)
+    case timedOut
 
     var errorDescription: String? {
         switch self {
         case .scriptFailed(let msg): "Triage query failed: \(msg)"
+        case .timedOut: "Triage query failed: Mail.app didn't respond in time"
         }
     }
 }

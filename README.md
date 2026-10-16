@@ -117,7 +117,8 @@ Environment variables (prompted if not set):
 - **MailKit extension** — embedded `MEComposeSessionHandler` (extensible)
 - **Keyboard shortcuts** — `CGEvent` tap intercepts keys before Mail.app, suppresses originals
 - **Mail.app communication** — AppleScript via `osascript` subprocess
-- **Data** — SwiftData for activity history; Mail.app rules for block list; Reminders.app for tasks
+- **Data** — SwiftData for activity history (last 31 days, in `~/Library/Application Support/com.subversivesoftware.triage/`); Mail.app rules for block list; Reminders.app for tasks
+- **App group** — `84CC987JU3.com.subversivesoftware.triage`. It must be prefixed with the team ID: macOS 27 blocks Developer ID apps from `group.`-prefixed containers, which crashed 1.1.0 at launch
 - **Auto-update** — Sparkle framework with EdDSA-signed appcast
 
 ## Requirements

@@ -96,8 +96,8 @@ struct DashboardView: View {
             }
             .padding()
 
-            if let error = store.errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle")
+            ForEach([store.storageWarning, store.errorMessage].compactMap { $0 }, id: \.self) { message in
+                Label(message, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
                     .font(.caption)
                     .padding(.horizontal)

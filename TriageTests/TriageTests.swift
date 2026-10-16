@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import Triage
 
@@ -47,8 +48,19 @@ struct AccountParsingTests {
         #expect(accounts[0].email == "user@icloud.com")
         #expect(accounts[0].unreadCount == 3)
         #expect(accounts[0].totalInboxCount == 10)
+        #expect(accounts[0].sentCount == 5)
+        #expect(accounts[0].trashCount == 2)
         #expect(accounts[1].name == "GMail")
         #expect(accounts[1].unreadCount == 0)
+        #expect(accounts[1].sentCount == 20)
+        #expect(accounts[1].trashCount == 8)
+    }
+
+    @Test func defaultsSentAndTrashWhenMissing() {
+        let accounts = MailQueryService.parseAccountOutput("iCloud\tuser@icloud.com\t3\t10")
+        #expect(accounts.count == 1)
+        #expect(accounts[0].sentCount == 0)
+        #expect(accounts[0].trashCount == 0)
     }
 
     @Test func handlesEmptyOutput() {
@@ -164,5 +176,116 @@ struct AccountSnapshotTests {
     @Test func idMatchesName() {
         let account = AccountSnapshot(name: "GMail", email: "", unreadCount: 0, totalInboxCount: 0)
         #expect(account.id == "GMail")
+    }
+}
+
+@Suite("Legacy Store Migration")
+struct LegacyStoreMigrationTests {
+
+    private let journalSuffixes = ["", "-wal", "-shm"]
+
+    private func makeStoreURLs() throws -> (root: URL, source: URL, destination: URL) {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let source = root.appending(path: "old/Triage.store")
+        let destination = root.appending(path: "new/Triage.store")
+        for url in [source, destination] {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+        return (root, source, destination)
+    }
+
+    @Test func copiesStoreAndJournalFiles() throws {
+        let (root, source, destination) = try makeStoreURLs()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for suffix in journalSuffixes {
+            try Data("old\(suffix)".utf8).write(to: URL(fileURLWithPath: source.path + suffix))
+        }
+
+        #expect(TriageStore.migrateLegacyStore(from: source, to: destination))
+        for suffix in journalSuffixes {
+            #expect(try String(contentsOfFile: destination.path + suffix, encoding: .utf8) == "old\(suffix)")
+        }
+        #expect(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    @Test func leavesExistingStoreAlone() throws {
+        let (root, source, destination) = try makeStoreURLs()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("old".utf8).write(to: source)
+        try Data("new".utf8).write(to: destination)
+
+        #expect(!TriageStore.migrateLegacyStore(from: source, to: destination))
+        #expect(try String(contentsOf: destination, encoding: .utf8) == "new")
+    }
+
+    @Test func skipsWhenNoLegacyStore() throws {
+        let (root, source, destination) = try makeStoreURLs()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        #expect(!TriageStore.migrateLegacyStore(from: source, to: destination))
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+}
+
+@Suite("History Pruning")
+struct HistoryPruningTests {
+
+    @MainActor @Test func deletesOnlyRecordsBeforeCutoff() throws {
+        // On-disk store: SwiftData's batch delete behaves differently in memory.
+        let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).store")
+        defer {
+            for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: url.path + suffix) }
+        }
+        let config = ModelConfiguration(schema: TriageStore.schema, url: url, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: TriageStore.schema, configurations: [config])
+        let context = ModelContext(container)
+        let now = Date.now
+        context.insert(ActivityRecord(accountName: "old", timestamp: now.addingTimeInterval(-40 * 86_400)))
+        context.insert(ActivityRecord(accountName: "recent", timestamp: now.addingTimeInterval(-86_400)))
+        try context.save()
+
+        StatsStore.pruneHistory(in: ModelContext(container), before: now.addingTimeInterval(-31 * 86_400))
+
+        let remaining = try ModelContext(container).fetch(FetchDescriptor<ActivityRecord>())
+        #expect(remaining.map(\.accountName) == ["recent"])
+    }
+}
+
+@Suite("AppleScript Runner")
+struct AppleScriptRunnerTests {
+
+    @Test func returnsOutputLargerThanPipeBuffer() async throws {
+        // 10 * 2^14 = 163,840 characters, well past the 64 KB pipe buffer.
+        let script = """
+        set s to "0123456789"
+        repeat 14 times
+            set s to s & s
+        end repeat
+        return s
+        """
+        let output = try await AppleScriptRunner.run(script, timeout: 20)
+        #expect(output.count == 163_840)
+    }
+
+    @Test func killsScriptAfterTimeout() async {
+        let start = Date.now
+        let error = await #expect(throws: MailQueryError.self) {
+            try await AppleScriptRunner.run("delay 10", timeout: 1)
+        }
+        if case .timedOut? = error {} else {
+            Issue.record("Expected .timedOut, got \(String(describing: error))")
+        }
+        #expect(Date.now.timeIntervalSince(start) < 5)
+    }
+
+    @Test func reportsScriptErrors() async {
+        let error = await #expect(throws: MailQueryError.self) {
+            try await AppleScriptRunner.run("error \"boom\"")
+        }
+        guard case .scriptFailed(let message)? = error else {
+            Issue.record("Expected .scriptFailed, got \(String(describing: error))")
+            return
+        }
+        #expect(message.contains("boom"))
     }
 }

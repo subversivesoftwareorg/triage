@@ -124,8 +124,10 @@ final class KeyboardShortcutService {
 
     // MARK: - Event tap callback
 
+    // Passing an event through returns it unretained, like `return event;` in C.
+    // passRetained here leaked one CGEvent per keystroke.
     private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, userInfo in
-        guard let userInfo else { return Unmanaged.passRetained(event) }
+        guard let userInfo else { return Unmanaged.passUnretained(event) }
         let service = Unmanaged<KeyboardShortcutService>.fromOpaque(userInfo).takeUnretainedValue()
 
         // Re-enable tap if macOS disabled it (happens if callback takes too long)
@@ -133,14 +135,14 @@ final class KeyboardShortcutService {
             if let tap = service.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
-        guard type == .keyDown else { return Unmanaged.passRetained(event) }
+        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
 
         // Only intercept when Mail.app is frontmost
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Constants.mailBundleID else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         let flags = event.flags
@@ -198,17 +200,17 @@ final class KeyboardShortcutService {
 
         // Pass through if modifier keys are held (real shortcuts like Cmd+R)
         if flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate) {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         // Check if this is one of our shortcut keys
         guard let action = keyActions[keyCode] else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         // Don't intercept if a text field is focused
         if isTextInputFocusedStatic() {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         // Suppress the original keystroke and fire our action
@@ -320,19 +322,17 @@ final class KeyboardShortcutService {
 
         var body = "Sent to: \(Self.escaped(recipients))"
 
-        // Wait for the message to land in Sent, then grab its message-id
+        // Wait for the message to land in Sent, then grab its message-id. `sent mailbox` is
+        // the unified All Sent mailbox (accounts don't have one), ordered newest first.
         try? await Task.sleep(for: .seconds(3))
         let lookupScript = """
         tell application "Mail"
-            repeat with acct in every account
-                try
-                    set sentBox to sent mailbox of acct
-                    set msgs to (every message of sentBox whose subject is "\(Self.escaped(subject))")
-                    if (count of msgs) > 0 then
-                        return message id of item 1 of msgs
-                    end if
-                end try
-            end repeat
+            try
+                set msgs to (every message of sent mailbox whose subject is "\(Self.escaped(subject))")
+                if (count of msgs) > 0 then
+                    return message id of item 1 of msgs
+                end if
+            end try
             return ""
         end tell
         """
@@ -493,26 +493,7 @@ final class KeyboardShortcutService {
     }
 
     private func runScript(_ source: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", source]
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-            process.terminationHandler = { proc in
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                if proc.terminationStatus == 0, let out = String(data: data, encoding: .utf8) {
-                    continuation.resume(returning: out.trimmingCharacters(in: .whitespacesAndNewlines))
-                } else {
-                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let errMsg = String(data: errData, encoding: .utf8) ?? "osascript failed"
-                    continuation.resume(throwing: MailQueryError.scriptFailed(errMsg))
-                }
-            }
-            do { try process.run() } catch { continuation.resume(throwing: error) }
-        }
+        try await AppleScriptRunner.run(source)
     }
 
     private static func escaped(_ s: String) -> String {
